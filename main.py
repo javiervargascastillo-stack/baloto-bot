@@ -125,7 +125,7 @@ def generar_y_enviar_reporte():
     mensaje += "\n\n".join(lineas_historial[:5])
 
     # Envío a Telegram
-    if TELEGRAM_TOKEN : "8879192174:AAEXx_k8F9on9arUsBK1qAf4EVhRWjVVU3o":
+    if TELEGRAM_TOKEN:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
