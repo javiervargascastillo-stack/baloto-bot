@@ -1,0 +1,37 @@
+name: Baloto Bot Execution
+
+on:
+  schedule:
+    # 04:30 UTC = 11:30 PM Colombia (Noches de Lunes, Miércoles y Sábado)
+    - cron: '30 4 * * 0,2,4'
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run Main Script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: Guardar cambios en baloto.db
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-update: Nuevo sorteo registrado en baloto.db"
+          file_pattern: "baloto.db"
