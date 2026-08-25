@@ -3,7 +3,7 @@ import sys
 import sqlite3
 import requests
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from baloto_scraper import obtener_ultimo_sorteo
 from database import guardar_sorteo
@@ -40,7 +40,6 @@ def generar_y_enviar_reporte():
     try:
         sorteo_nuevo = obtener_ultimo_sorteo()
         if sorteo_nuevo:
-            # Intento de guardado según firmas soportadas sin alterar lógica previa
             if 'revancha_numeros' in sorteo_nuevo and 'revancha_superbalota' in sorteo_nuevo:
                 try:
                     guardar_sorteo(
@@ -67,15 +66,15 @@ def generar_y_enviar_reporte():
         cols_query = "n1, n2, n3, n4, n5, superbalota"
 
     cursor.execute(f"SELECT fecha, {cols_query} FROM sorteos ORDER BY fecha DESC")
-    sorteos = cursor.fetchall()
+    sorteos_raw = cursor.fetchall()
 
-    if not sorteos:
+    if not sorteos_raw:
         print("❌ No hay sorteos en la base de datos.")
         conn.close()
         sys.exit(1)
 
-# 1.1 Consultar historial Baloto Revancha
-    sorteos_revancha = []
+    # 1.1 Consultar historial Baloto Revancha (Estructura robusta)
+    sorteos_revancha_raw = []
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
     tablas = [t[0] for t in cursor.fetchall()]
 
@@ -83,16 +82,15 @@ def generar_y_enviar_reporte():
         cursor.execute("PRAGMA table_info(sorteos_revancha)")
         cols_rev = [col[1] for col in cursor.fetchall()]
         cols_q = "b1, b2, b3, b4, b5, sb" if 'b1' in cols_rev else ("n1, n2, n3, n4, n5, superbalota" if 'n1' in cols_rev else "*")
-        cursor.execute(f"SELECT fecha, {cols_q} FROM sorteos_revancha ORDER BY fecha DESC LIMIT 20")
-        sorteos_revancha = cursor.fetchall()
+        cursor.execute(f"SELECT fecha, {cols_q} FROM sorteos_revancha ORDER BY fecha DESC")
+        sorteos_revancha_raw = cursor.fetchall()
     elif 'revancha' in tablas:
         cursor.execute("PRAGMA table_info(revancha)")
         cols_rev = [col[1] for col in cursor.fetchall()]
         cols_q = "b1, b2, b3, b4, b5, sb" if 'b1' in cols_rev else ("n1, n2, n3, n4, n5, superbalota" if 'n1' in cols_rev else "*")
-        cursor.execute(f"SELECT fecha, {cols_q} FROM revancha ORDER BY fecha DESC LIMIT 20")
-        sorteos_revancha = cursor.fetchall()
+        cursor.execute(f"SELECT fecha, {cols_q} FROM revancha ORDER BY fecha DESC")
+        sorteos_revancha_raw = cursor.fetchall()
     else:
-        # Buscar columnas de revancha en la misma tabla 'sorteos'
         col_r_balotas = []
         for prefijo in ['r', 'rb', 'rn', 'rev']:
             cands = [f"{prefijo}{i}" for i in range(1, 6)]
@@ -109,128 +107,163 @@ def generar_y_enviar_reporte():
         if col_r_balotas and col_r_sb:
             cols_rev_str = ", ".join(col_r_balotas) + f", {col_r_sb}"
             first_c = col_r_balotas[0]
-            cursor.execute(f"SELECT fecha, {cols_rev_str} FROM sorteos WHERE {first_c} IS NOT NULL ORDER BY fecha DESC LIMIT 20")
-            sorteos_revancha = cursor.fetchall()
+            cursor.execute(f"SELECT fecha, {cols_rev_str} FROM sorteos WHERE {first_c} IS NOT NULL ORDER BY fecha DESC")
+            sorteos_revancha_raw = cursor.fetchall()
 
     conn.close()
 
-    total_sorteos = len(sorteos)
-    fecha_mas_reciente = sorteos[0][0]
-    fecha_mas_antigua = sorteos[-1][0]
+    fecha_mas_reciente = sorteos_raw[0][0]
     dt_mas_reciente = parse_fecha(fecha_mas_reciente)
 
-    # Ventana de exclusión (Últimos 3 sorteos)
-    num_ultimo = set(sorteos[0][1:6]) if len(sorteos) > 0 else set()
-    num_penultimo = set(sorteos[1][1:6]) if len(sorteos) > 1 else set()
-    num_antepenultimo = set(sorteos[2][1:6]) if len(sorteos) > 2 else set()
+    # Periodo histórico general: último año (365 días)
+    limite_1ano = dt_mas_reciente - timedelta(days=365)
+    # Ventana de mayor peso para el ponderado (últimos 60 días / ~2 meses)
+    limite_peso_reciente = dt_mas_reciente - timedelta(days=60)
 
-    sb_ultimo = {sorteos[0][6]} if len(sorteos) > 0 else set()
-    sb_penultimo = {sorteos[1][6]} if len(sorteos) > 1 else set()
-    sb_antepenultimo = {sorteos[2][6]} if len(sorteos) > 2 else set()
+    sorteos = [s for s in sorteos_raw if parse_fecha(s[0]) >= limite_1ano]
+    if not sorteos:
+        sorteos = [sorteos_raw[0]]
 
-    recientes_balotas = num_ultimo | num_penultimo | num_antepenultimo
-    recientes_superbalotas = sb_ultimo | sb_penultimo | sb_antepenultimo
+    sorteos_revancha = [s for s in sorteos_revancha_raw if parse_fecha(s[0]) >= limite_1ano]
 
-    # 2. Conteo de Frecuencias (Estándar y Ponderada)
+    total_sorteos = len(sorteos)
+    fecha_mas_antigua = sorteos[-1][0]
+
+    # Ventanas de últimos 3 sorteos independientes para Normal y Revancha (para colores y exclusión)
+    # NORMAL
+    num_ultimo_norm = set(sorteos[0][1:6]) if len(sorteos) > 0 else set()
+    num_penult_norm = set(sorteos[1][1:6]) if len(sorteos) > 1 else set()
+    num_antep_norm = set(sorteos[2][1:6]) if len(sorteos) > 2 else set()
+
+    sb_ultimo_norm = {sorteos[0][6]} if len(sorteos) > 0 else set()
+    sb_penult_norm = {sorteos[1][6]} if len(sorteos) > 1 else set()
+    sb_antep_norm = {sorteos[2][6]} if len(sorteos) > 2 else set()
+
+    recientes_balotas_norm = num_ultimo_norm | num_penult_norm | num_antep_norm
+    recientes_sb_norm = sb_ultimo_norm | sb_penult_norm | sb_antep_norm
+
+    # REVANCHA
+    num_ultimo_rev = set(sorteos_revancha[0][1:6]) if len(sorteos_revancha) > 0 else set()
+    num_penult_rev = set(sorteos_revancha[1][1:6]) if len(sorteos_revancha) > 1 else set()
+    num_antep_rev = set(sorteos_revancha[2][1:6]) if len(sorteos_revancha) > 2 else set()
+
+    sb_ultimo_rev = {sorteos_revancha[0][6]} if len(sorteos_revancha) > 0 else set()
+    sb_penult_rev = {sorteos_revancha[1][6]} if len(sorteos_revancha) > 1 else set()
+    sb_antep_rev = {sorteos_revancha[2][6]} if len(sorteos_revancha) > 2 else set()
+
+    recientes_balotas_rev = num_ultimo_rev | num_penult_rev | num_antep_rev
+    recientes_sb_rev = sb_ultimo_rev | sb_penult_rev | sb_antep_rev
+
+    # 2. Conteo de Frecuencias (HISTÓRICO 1 AÑO - Estándar)
     conteo_estandar_balotas = Counter()
     conteo_estandar_sb = Counter()
-    
-    conteo_ponderado_balotas = Counter()
-    conteo_ponderado_sb = Counter()
 
     for s in sorteos:
-        dt_sorteo = parse_fecha(s[0])
-        dias_diferencia = (dt_mas_reciente - dt_sorteo).days
-        peso = 1.5 if dias_diferencia <= 90 else 1.0
-
         conteo_estandar_balotas.update(s[1:6])
         conteo_estandar_sb.update([s[6]])
 
-        for num in s[1:6]:
-            conteo_ponderado_balotas[num] += peso
-        conteo_ponderado_sb[s[6]] += peso
+    for s in sorteos_revancha:
+        conteo_estandar_balotas.update(s[1:6])
+        conteo_estandar_sb.update([s[6]])
 
     frec_estandar_balotas = conteo_estandar_balotas.most_common()
     frec_estandar_sb = conteo_estandar_sb.most_common()
 
+    # 2.1 Conteo de Frecuencias (PONDERADO REAL: 1 año completo multiplicando peso a los últimos 2 meses)
+    conteo_ponderado_balotas = Counter()
+    conteo_ponderado_sb = Counter()
+
+    for s in sorteos:
+        peso = 2.0 if parse_fecha(s[0]) >= limite_peso_reciente else 1.0
+        for num in s[1:6]:
+            conteo_ponderado_balotas[num] += peso
+        conteo_ponderado_sb[s[6]] += peso
+
+    for s in sorteos_revancha:
+        peso = 2.0 if parse_fecha(s[0]) >= limite_peso_reciente else 1.0
+        for num in s[1:6]:
+            conteo_ponderado_balotas[num] += peso
+        conteo_ponderado_sb[s[6]] += peso
+
+    # .most_common() ordena automáticamente de mayor a menor puntaje ponderado acumulado
     frec_pond_balotas = conteo_ponderado_balotas.most_common()
     frec_pond_sb = conteo_ponderado_sb.most_common()
 
-    top_6_balotas = set([num for num, _ in frec_estandar_balotas[:6]])
-    top_6_superbalotas = set([sb for sb, _ in frec_estandar_sb[:6]])
-
     # 3. Pronósticos
-    p1_balotas_filtradas = [num for num, _ in frec_estandar_balotas if num not in recientes_balotas]
-    p1_sb_filtradas = [sb for sb, _ in frec_estandar_sb if sb not in recientes_superbalotas]
-    p1_balotas = sorted(p1_balotas_filtradas[:5])
-    p1_sb = p1_sb_filtradas[0] if p1_sb_filtradas else frec_estandar_sb[0][0]
+    recientes_balotas_total = recientes_balotas_norm | recientes_balotas_rev
+    recientes_sb_total = recientes_sb_norm | recientes_sb_rev
 
-    p2_balotas_filtradas = [num for num, _ in frec_pond_balotas if num not in recientes_balotas]
-    p2_sb_filtradas = [sb for sb, _ in frec_pond_sb if sb not in recientes_superbalotas]
+    p1_balotas_filtradas = [num for num, _ in frec_estandar_balotas if num not in recientes_balotas_total]
+    p1_sb_filtradas = [sb for sb, _ in frec_estandar_sb if sb not in recientes_sb_total]
+    p1_balotas = sorted(p1_balotas_filtradas[:5])
+    p1_sb = p1_sb_filtradas[0] if p1_sb_filtradas else (frec_estandar_sb[0][0] if frec_estandar_sb else 1)
+
+    p2_balotas_filtradas = [num for num, _ in frec_pond_balotas if num not in recientes_balotas_total]
+    p2_sb_filtradas = [sb for sb, _ in frec_pond_sb if sb not in recientes_sb_total]
     p2_balotas = sorted(p2_balotas_filtradas[:5])
-    p2_sb = p2_sb_filtradas[0] if p2_sb_filtradas else frec_pond_sb[0][0]
+    p2_sb = p2_sb_filtradas[0] if p2_sb_filtradas else (frec_pond_sb[0][0] if frec_pond_sb else 1)
 
     str_p1 = " - ".join([f"{n:02d}" for n in p1_balotas])
     str_p2 = " - ".join([f"{n:02d}" for n in p2_balotas])
 
-    # 4. Formatear Frecuencia Balotas
+    # 4. Formatear Frecuencias Balotas UNIFICADO (Top 20)
     lineas_frecuencia = []
     for num, frec in frec_estandar_balotas:
         etiqueta = ""
-        if num in top_6_balotas:
-            if num in num_ultimo:
-                etiqueta = " 🔴 [Último]"
-            elif num in num_penultimo:
-                etiqueta = " 🟠 [Penúlt.]"
-            elif num in num_antepenultimo:
-                etiqueta = " 🟡 [Antep.]"
+        if num in num_ultimo_norm or num in num_ultimo_rev:
+            etiqueta = " 🔴 [Último]"
+        elif num in num_penult_norm or num in num_penult_rev:
+            etiqueta = " 🟠 [Penúlt.]"
+        elif num in num_antep_norm or num in num_antep_rev:
+            etiqueta = " 🟡 [Antep.]"
         lineas_frecuencia.append(f"Balota {num:02d}: {frec} veces{etiqueta}")
 
-    # 5. Formatear Frecuencia Superbalotas
+    # 5. Formatear Superbalotas UNIFICADO (Top 10)
     lineas_superbalotas = []
     for sb, frec in frec_estandar_sb:
         etiqueta = ""
-        if sb in top_6_superbalotas:
-            if sb in sb_ultimo:
-                etiqueta = " 🔴 [Último]"
-            elif sb in sb_penultimo:
-                etiqueta = " 🟠 [Penúlt.]"
-            elif sb in sb_antepenultimo:
-                etiqueta = " 🟡 [Antep.]"
+        if sb in sb_ultimo_norm or sb in sb_ultimo_rev:
+            etiqueta = " 🔴 [Último]"
+        elif sb in sb_penult_norm or sb in sb_penult_rev:
+            etiqueta = " 🟠 [Penúlt.]"
+        elif sb in sb_antep_norm or sb in sb_antep_rev:
+            etiqueta = " 🟡 [Antep.]"
         lineas_superbalotas.append(f"Superbalota {sb:02d}: {frec} veces{etiqueta}")
 
-    # 6. Formatear Historial Balotas Tradicional (Últimos 20)
+    # 6. Formatear Historial Balotas Tradicional
     lineas_historial = []
     for s in sorteos[:20]:
         fecha, n1, n2, n3, n4, n5, sb = s
         lineas_historial.append(f"<b>{fecha}</b>: {n1:02d}-{n2:02d}-{n3:02d}-{n4:02d}-{n5:02d} (SB: {sb:02d})")
 
-    # 7. Formatear Historial Balotas Revancha (Últimos 20)
+    # 7. Formatear Historial Balotas Revancha
     lineas_historial_rev = []
     for s in sorteos_revancha[:20]:
         fecha, r1, r2, r3, r4, r5, sbr = s
         lineas_historial_rev.append(f"<b>{fecha}</b>: {r1:02d}-{r2:02d}-{r3:02d}-{r4:02d}-{r5:02d} (SB: {sbr:02d})")
 
-    # Mensaje consolidado
+    # Mensaje consolidado para Telegram
     mensaje = f"📅 <b>PERIODO HISTÓRICO: {fecha_mas_antigua} al {fecha_mas_reciente} ({total_sorteos} sorteos)</b>\n\n"
-    mensaje += f"🎯 <b>PRONÓSTICO 1 (Frecuencia Histórica)</b>\n"
+    mensaje += f"🎯 <b>PRONÓSTICO 1 (Frecuencia Histórica 1 Año)</b>\n"
     mensaje += f"• Números: <b>{str_p1}</b>\n"
     mensaje += f"• Superbalota: <b>{p1_sb:02d}</b>\n\n"
-    mensaje += f"⚡ <b>PRONÓSTICO 2 (Ponderado 3M x1.5)</b>\n"
+    mensaje += f"⚡ <b>PRONÓSTICO 2 (Ponderado 1 Año - Premium Últimos 2 Meses)</b>\n"
     mensaje += f"• Números: <b>{str_p2}</b>\n"
     mensaje += f"• Superbalota: <b>{p2_sb:02d}</b>\n\n"
-    mensaje += "<b>📊 FRECUENCIA BALOTAS</b>\n" + "\n".join(lineas_frecuencia[:10]) + "\n\n"
-    mensaje += "<b>🔴 SUPERBALOTAS</b>\n" + "\n".join(lineas_superbalotas[:8]) + "\n\n"
-    mensaje += "<b>📅 ÚLTIMOS 20 SORTEOS BALOTO</b>\n" + "\n".join(lineas_historial)
+    
+    mensaje += "<b>📊 FRECUENCIA BALOTAS (TOP 20 - UNIFICADO)</b>\n" + ("\n".join(lineas_frecuencia[:20]) if lineas_frecuencia else "Sin datos") + "\n\n"
+    mensaje += "<b>🔴 SUPERBALOTAS (TOP 10 - UNIFICADO)</b>\n" + ("\n".join(lineas_superbalotas[:10]) if lineas_superbalotas else "Sin datos") + "\n\n"
+
+    mensaje += "<b>📅 SORTEOS EN EL PERIODO (BALOTO)</b>\n" + ("\n".join(lineas_historial) if lineas_historial else "Ninguno")
     
     if lineas_historial_rev:
-        mensaje += "\n\n<b>🔄 ÚLTIMOS 20 SORTEOS REVANCHA</b>\n" + "\n".join(lineas_historial_rev)
+        mensaje += "\n\n<b>🔄 SORTEOS EN EL PERIODO (REVANCHA)</b>\n" + "\n".join(lineas_historial_rev)
 
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         res = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"})
         if res.status_code == 200:
-            print("✅ Reporte enviado correctamente a Telegram.")
+            print("✅ Reporte con ponderado real enviado correctamente a Telegram.")
         else:
             print(f"⚠️ Error enviando a Telegram: {res.text}")
     else:
