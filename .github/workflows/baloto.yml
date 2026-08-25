@@ -2,9 +2,9 @@ name: Baloto Bot Auto
 
 on:
   schedule:
-    # Se ejecuta martes, jueves y domingos a la 1:00 AM UTC (tras los sorteos del lunes, miércoles y sábado)
-    - cron: '0 1 * * 0,2,4'
-  workflow_dispatch: # Permite ejecutarlo manualmente cuando quieras
+    # Se ejecuta martes, jueves y domingos a las 6:00 AM Colombia (11:00 AM UTC)
+    - cron: '0 11 * * 0,2,4'
+  workflow_dispatch: # Permite ejecución manual desde la pestaña Actions
 
 jobs:
   run-bot:
@@ -20,13 +20,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 pandas
+          pip install requests
 
-      - name: Run Baloto Bot
+      - name: Run Baloto Bot Script
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python fix_all.py
           python main.py
