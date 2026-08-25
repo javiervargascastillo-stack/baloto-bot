@@ -40,11 +40,21 @@ def generar_y_enviar_reporte():
     try:
         sorteo_nuevo = obtener_ultimo_sorteo()
         if sorteo_nuevo:
-            guardar_sorteo(sorteo_nuevo['fecha'], sorteo_nuevo['numeros'], sorteo_nuevo['superbalota'])
+            # Intento de guardado según firmas soportadas sin alterar lógica previa
+            if 'revancha_numeros' in sorteo_nuevo and 'revancha_superbalota' in sorteo_nuevo:
+                try:
+                    guardar_sorteo(
+                        sorteo_nuevo['fecha'], sorteo_nuevo['numeros'], sorteo_nuevo['superbalota'],
+                        sorteo_nuevo['revancha_numeros'], sorteo_nuevo['revancha_superbalota']
+                    )
+                except TypeError:
+                    guardar_sorteo(sorteo_nuevo['fecha'], sorteo_nuevo['numeros'], sorteo_nuevo['superbalota'])
+            else:
+                guardar_sorteo(sorteo_nuevo['fecha'], sorteo_nuevo['numeros'], sorteo_nuevo['superbalota'])
     except Exception as e:
         print(f"⚠️ No se pudo ejecutar el scraper: {e}")
 
-    # 1. Consultar historial completo ordenado por fecha DESCENDENTE
+    # 1. Consultar historial Baloto Tradicional
     conn = sqlite3.connect('baloto.db')
     cursor = conn.cursor()
     
@@ -58,18 +68,58 @@ def generar_y_enviar_reporte():
 
     cursor.execute(f"SELECT fecha, {cols_query} FROM sorteos ORDER BY fecha DESC")
     sorteos = cursor.fetchall()
-    conn.close()
 
     if not sorteos:
         print("❌ No hay sorteos en la base de datos.")
+        conn.close()
         sys.exit(1)
+
+# 1.1 Consultar historial Baloto Revancha
+    sorteos_revancha = []
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tablas = [t[0] for t in cursor.fetchall()]
+
+    if 'sorteos_revancha' in tablas:
+        cursor.execute("PRAGMA table_info(sorteos_revancha)")
+        cols_rev = [col[1] for col in cursor.fetchall()]
+        cols_q = "b1, b2, b3, b4, b5, sb" if 'b1' in cols_rev else ("n1, n2, n3, n4, n5, superbalota" if 'n1' in cols_rev else "*")
+        cursor.execute(f"SELECT fecha, {cols_q} FROM sorteos_revancha ORDER BY fecha DESC LIMIT 20")
+        sorteos_revancha = cursor.fetchall()
+    elif 'revancha' in tablas:
+        cursor.execute("PRAGMA table_info(revancha)")
+        cols_rev = [col[1] for col in cursor.fetchall()]
+        cols_q = "b1, b2, b3, b4, b5, sb" if 'b1' in cols_rev else ("n1, n2, n3, n4, n5, superbalota" if 'n1' in cols_rev else "*")
+        cursor.execute(f"SELECT fecha, {cols_q} FROM revancha ORDER BY fecha DESC LIMIT 20")
+        sorteos_revancha = cursor.fetchall()
+    else:
+        # Buscar columnas de revancha en la misma tabla 'sorteos'
+        col_r_balotas = []
+        for prefijo in ['r', 'rb', 'rn', 'rev']:
+            cands = [f"{prefijo}{i}" for i in range(1, 6)]
+            if all(c in columnas for c in cands):
+                col_r_balotas = cands
+                break
+        
+        col_r_sb = None
+        for cand_sb in ['sbr', 'rsb', 'rsuperbalota', 'rev_sb', 'sb_revancha', 'superbalota_revancha', 'sb_r', 'sb']:
+            if cand_sb in columnas and cand_sb not in col_r_balotas:
+                col_r_sb = cand_sb
+                break
+
+        if col_r_balotas and col_r_sb:
+            cols_rev_str = ", ".join(col_r_balotas) + f", {col_r_sb}"
+            first_c = col_r_balotas[0]
+            cursor.execute(f"SELECT fecha, {cols_rev_str} FROM sorteos WHERE {first_c} IS NOT NULL ORDER BY fecha DESC LIMIT 20")
+            sorteos_revancha = cursor.fetchall()
+
+    conn.close()
 
     total_sorteos = len(sorteos)
     fecha_mas_reciente = sorteos[0][0]
     fecha_mas_antigua = sorteos[-1][0]
     dt_mas_reciente = parse_fecha(fecha_mas_reciente)
 
-    # Números de los últimos 3 sorteos para la ventana de exclusión
+    # Ventana de exclusión (Últimos 3 sorteos)
     num_ultimo = set(sorteos[0][1:6]) if len(sorteos) > 0 else set()
     num_penultimo = set(sorteos[1][1:6]) if len(sorteos) > 1 else set()
     num_antepenultimo = set(sorteos[2][1:6]) if len(sorteos) > 2 else set()
@@ -90,15 +140,12 @@ def generar_y_enviar_reporte():
 
     for s in sorteos:
         dt_sorteo = parse_fecha(s[0])
-        # Ponderación: 1.5x si el sorteo fue en los últimos 90 días (3 meses), 1.0x para el resto
         dias_diferencia = (dt_mas_reciente - dt_sorteo).days
         peso = 1.5 if dias_diferencia <= 90 else 1.0
 
-        # Conteo estándar
         conteo_estandar_balotas.update(s[1:6])
         conteo_estandar_sb.update([s[6]])
 
-        # Conteo ponderado
         for num in s[1:6]:
             conteo_ponderado_balotas[num] += peso
         conteo_ponderado_sb[s[6]] += peso
@@ -112,14 +159,12 @@ def generar_y_enviar_reporte():
     top_6_balotas = set([num for num, _ in frec_estandar_balotas[:6]])
     top_6_superbalotas = set([sb for sb, _ in frec_estandar_sb[:6]])
 
-    # 3. Cálculo de Pronósticos
-    # Pronóstico 1: Frecuencia Estándar
+    # 3. Pronósticos
     p1_balotas_filtradas = [num for num, _ in frec_estandar_balotas if num not in recientes_balotas]
     p1_sb_filtradas = [sb for sb, _ in frec_estandar_sb if sb not in recientes_superbalotas]
     p1_balotas = sorted(p1_balotas_filtradas[:5])
     p1_sb = p1_sb_filtradas[0] if p1_sb_filtradas else frec_estandar_sb[0][0]
 
-    # Pronóstico 2: Frecuencia Ponderada (Inercia 3 meses)
     p2_balotas_filtradas = [num for num, _ in frec_pond_balotas if num not in recientes_balotas]
     p2_sb_filtradas = [sb for sb, _ in frec_pond_sb if sb not in recientes_superbalotas]
     p2_balotas = sorted(p2_balotas_filtradas[:5])
@@ -128,7 +173,7 @@ def generar_y_enviar_reporte():
     str_p1 = " - ".join([f"{n:02d}" for n in p1_balotas])
     str_p2 = " - ".join([f"{n:02d}" for n in p2_balotas])
 
-    # 4. Formatear Frecuencia Balotas (Textos acortados: 'veces', '[Penúlt.]', '[Antep.]')
+    # 4. Formatear Frecuencia Balotas
     lineas_frecuencia = []
     for num, frec in frec_estandar_balotas:
         etiqueta = ""
@@ -154,13 +199,19 @@ def generar_y_enviar_reporte():
                 etiqueta = " 🟡 [Antep.]"
         lineas_superbalotas.append(f"Superbalota {sb:02d}: {frec} veces{etiqueta}")
 
-    # 6. Formatear Historial (Punto 2: Últimos 20 sorteos)
+    # 6. Formatear Historial Balotas Tradicional (Últimos 20)
     lineas_historial = []
     for s in sorteos[:20]:
         fecha, n1, n2, n3, n4, n5, sb = s
         lineas_historial.append(f"<b>{fecha}</b>: {n1:02d}-{n2:02d}-{n3:02d}-{n4:02d}-{n5:02d} (SB: {sb:02d})")
 
-    # Mensaje consolidado para Telegram
+    # 7. Formatear Historial Balotas Revancha (Últimos 20)
+    lineas_historial_rev = []
+    for s in sorteos_revancha[:20]:
+        fecha, r1, r2, r3, r4, r5, sbr = s
+        lineas_historial_rev.append(f"<b>{fecha}</b>: {r1:02d}-{r2:02d}-{r3:02d}-{r4:02d}-{r5:02d} (SB: {sbr:02d})")
+
+    # Mensaje consolidado
     mensaje = f"📅 <b>PERIODO HISTÓRICO: {fecha_mas_antigua} al {fecha_mas_reciente} ({total_sorteos} sorteos)</b>\n\n"
     mensaje += f"🎯 <b>PRONÓSTICO 1 (Frecuencia Histórica)</b>\n"
     mensaje += f"• Números: <b>{str_p1}</b>\n"
@@ -170,7 +221,10 @@ def generar_y_enviar_reporte():
     mensaje += f"• Superbalota: <b>{p2_sb:02d}</b>\n\n"
     mensaje += "<b>📊 FRECUENCIA BALOTAS</b>\n" + "\n".join(lineas_frecuencia[:10]) + "\n\n"
     mensaje += "<b>🔴 SUPERBALOTAS</b>\n" + "\n".join(lineas_superbalotas[:8]) + "\n\n"
-    mensaje += "<b>📅 ÚLTIMOS 20 SORTEOS</b>\n" + "\n".join(lineas_historial)
+    mensaje += "<b>📅 ÚLTIMOS 20 SORTEOS BALOTO</b>\n" + "\n".join(lineas_historial)
+    
+    if lineas_historial_rev:
+        mensaje += "\n\n<b>🔄 ÚLTIMOS 20 SORTEOS REVANCHA</b>\n" + "\n".join(lineas_historial_rev)
 
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
