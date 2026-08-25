@@ -2,8 +2,8 @@ name: Baloto Bot Auto
 
 on:
   schedule:
-    # Se ejecuta jueves y domingos a la 1:00 AM UTC (tras los sorteos del miércoles y sábado)
-    - cron: '0 1 * * 0,4'
+    # Se ejecuta martes, jueves y domingos a la 1:00 AM UTC (tras los sorteos del lunes, miércoles y sábado)
+    - cron: '0 1 * * 0,2,4'
   workflow_dispatch: # Permite ejecutarlo manualmente cuando quieras
 
 jobs:
