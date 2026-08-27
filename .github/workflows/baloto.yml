@@ -3,7 +3,7 @@ name: Baloto Bot Auto
 on:
   schedule:
     # Se ejecuta martes, jueves y domingos a las 6:00 AM Colombia (11:00 AM UTC)
-    - cron: '*/5 * * * *'
+    - cron: '50 4 * * 0,2,4'
   workflow_dispatch: # Permite ejecución manual desde la pestaña Actions
 
 jobs:
